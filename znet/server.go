@@ -13,15 +13,17 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gorilla/websocket"
+
 	"github.com/aceld/zinx/logo"
 	"github.com/aceld/zinx/zconf"
 	"github.com/aceld/zinx/zdecoder"
 	"github.com/aceld/zinx/zlog"
-	"github.com/gorilla/websocket"
+
+	"github.com/xtaci/kcp-go"
 
 	"github.com/aceld/zinx/ziface"
 	"github.com/aceld/zinx/zpack"
-	"github.com/xtaci/kcp-go"
 )
 
 // Server interface implementation, defines a Server service class
@@ -37,6 +39,8 @@ type Server struct {
 	Port int
 	// 服务绑定的websocket 端口 (Websocket port the server is bound to)
 	WsPort int
+	// 服务绑定的websocket 路径 (Websocket path the server is bound to)
+	WsPath string
 	// 服务绑定的kcp 端口 (kcp port the server is bound to)
 	KcpPort int
 
@@ -46,8 +50,9 @@ type Server struct {
 
 	// Routing mode (路由模式)
 	RouterSlicesMode bool
-
-	// Current server's connection manager (当前Server的链接管理器)
+	// Request 对象池模式
+	RequestPoolMode bool
+	// Current server's connection manager (当前Server的连接管理器)
 	ConnMgr ziface.IConnManager
 
 	// Hook function called when a new connection is established
@@ -63,7 +68,7 @@ type Server struct {
 	packet ziface.IDataPack
 
 	// Asynchronous capture of connection closing status
-	// (异步捕获链接关闭状态)
+	// (异步捕获连接关闭状态)
 	exitChan chan struct{}
 
 	// Decoder for dealing with message fragmentation and reassembly
@@ -84,6 +89,10 @@ type Server struct {
 
 	// connection id
 	cID uint64
+
+	// Custom frame decoder for handling custom packet splitting
+	// (自定义帧解码器，用于处理自定义粘包)
+	frameDecoder ziface.IFrameDecoder
 }
 
 type KcpConfig struct {
@@ -111,6 +120,12 @@ type KcpConfig struct {
 	// RCV_BUF, this unit is the packet, default 32.
 	// (RCV_BUF接收缓冲区大小，单位是包，默认是32)
 	KcpRecvWindow int
+	// FEC data shards, default 0.
+	// (FEC数据分片,用于前向纠错比例配制) 默认是0
+	KcpFecDataShards int
+	// FEC parity shards, default 0.
+	// (FEC校验分片,用于前向纠错比例配制) 默认是0
+	KcpFecParityShards int
 }
 
 // newServerWithConfig creates a server handle based on config
@@ -124,9 +139,11 @@ func newServerWithConfig(config *zconf.Config, ipVersion string, opts ...Option)
 		IP:               config.Host,
 		Port:             config.TCPPort,
 		WsPort:           config.WsPort,
+		WsPath:           config.WsPath,
 		KcpPort:          config.KcpPort,
 		msgHandler:       newMsgHandle(),
 		RouterSlicesMode: config.RouterSlicesMode,
+		RequestPoolMode:  config.RequestPoolMode,
 		ConnMgr:          newConnManager(),
 		exitChan:         nil,
 		// Default to using Zinx's TLV data pack format
@@ -140,14 +157,16 @@ func newServerWithConfig(config *zconf.Config, ipVersion string, opts ...Option)
 			},
 		},
 		kcpConfig: &KcpConfig{
-			KcpACKNoDelay: config.KcpACKNoDelay,
-			KcpStreamMode: config.KcpStreamMode,
-			KcpNoDelay:    config.KcpNoDelay,
-			KcpInterval:   config.KcpInterval,
-			KcpResend:     config.KcpResend,
-			KcpNc:         config.KcpNc,
-			KcpSendWindow: config.KcpSendWindow,
-			KcpRecvWindow: config.KcpRecvWindow,
+			KcpACKNoDelay:      config.KcpACKNoDelay,
+			KcpStreamMode:      config.KcpStreamMode,
+			KcpNoDelay:         config.KcpNoDelay,
+			KcpInterval:        config.KcpInterval,
+			KcpResend:          config.KcpResend,
+			KcpNc:              config.KcpNc,
+			KcpSendWindow:      config.KcpSendWindow,
+			KcpRecvWindow:      config.KcpRecvWindow,
+			KcpFecDataShards:   config.KcpFecDataShards,
+			KcpFecParityShards: config.KcpFecParityShards,
 		},
 	}
 
@@ -221,6 +240,7 @@ func (s *Server) StartConn(conn ziface.IConnection) {
 }
 
 func (s *Server) ListenTcpConn() {
+	zlog.Ins().InfoF("[START] TCP Server name: %s,listener at IP: %s, Port %d is starting", s.Name, s.IP, s.Port)
 	// 1. Get a TCP address
 	addr, err := net.ResolveTCPAddr(s.IPVersion, fmt.Sprintf("%s:%d", s.IP, s.Port))
 	if err != nil {
@@ -298,8 +318,8 @@ func (s *Server) ListenTcpConn() {
 }
 
 func (s *Server) ListenWebsocketConn() {
-	zlog.Ins().InfoF("[START] WEBSOCKET Server name: %s,listener at IP: %s, Port %d is starting", s.Name, s.IP, s.WsPort)
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	zlog.Ins().InfoF("[START] WEBSOCKET Server name: %s,listener at IP: %s, Port %d, Path %s is starting", s.Name, s.IP, s.WsPort, s.WsPath)
+	http.HandleFunc(s.WsPath, func(w http.ResponseWriter, r *http.Request) {
 		// 1. Check if the server has reached the maximum allowed number of connections
 		// (设置服务器最大连接控制,如果超过最大连接，则等待)
 		if s.ConnMgr.Len() >= zconf.GlobalObject.MaxConn {
@@ -336,21 +356,29 @@ func (s *Server) ListenWebsocketConn() {
 		// 5. Handle the business logic of the new connection, which should already be bound to a handler and conn
 		// 5. 处理该新连接请求的 业务 方法， 此时应该有 handler 和 conn是绑定的
 		newCid := atomic.AddUint64(&s.cID, 1)
-		wsConn := newWebsocketConn(s, conn, newCid)
+		wsConn := newWebsocketConn(s, conn, newCid, r)
 		go s.StartConn(wsConn)
 
 	})
 
-	err := http.ListenAndServe(fmt.Sprintf("%s:%d", s.IP, s.WsPort), nil)
-	if err != nil {
-		panic(err)
+	if zconf.GlobalObject.CertFile != "" && zconf.GlobalObject.PrivateKeyFile != "" {
+		err := http.ListenAndServeTLS(fmt.Sprintf("%s:%d", s.IP, s.WsPort), zconf.GlobalObject.CertFile, zconf.GlobalObject.PrivateKeyFile, nil)
+		if err != nil {
+			panic(err)
+		}
+	} else {
+		err := http.ListenAndServe(fmt.Sprintf("%s:%d", s.IP, s.WsPort), nil)
+		if err != nil {
+			panic(err)
+		}
 	}
+
 }
 
 func (s *Server) ListenKcpConn() {
 
 	// 1. Listen to the server address
-	listener, err := kcp.Listen(fmt.Sprintf("%s:%d", s.IP, s.KcpPort))
+	listener, err := kcp.ListenWithOptions(fmt.Sprintf("%s:%d", s.IP, s.KcpPort), nil, s.kcpConfig.KcpFecDataShards, s.kcpConfig.KcpFecParityShards)
 	if err != nil {
 		zlog.Ins().ErrorF("[START] resolve KCP addr err: %v\n", err)
 		return
@@ -405,13 +433,12 @@ func (s *Server) ListenKcpConn() {
 // Start the network service
 // (开启网络服务)
 func (s *Server) Start() {
-	zlog.Ins().InfoF("[START] Server name: %s,listener at IP: %s, Port %d is starting", s.Name, s.IP, s.Port)
 	s.exitChan = make(chan struct{})
 
-	// Add decoder to interceptors
-	// (将解码器添加到拦截器)
+	// Add decoder to interceptors head
+	// (将解码器添加到拦截器最前面)
 	if s.decoder != nil {
-		s.msgHandler.AddInterceptor(s.decoder)
+		s.msgHandler.SetHeadInterceptor(s.decoder)
 	}
 	// Start worker pool mechanism
 	// (启动worker工作池机制)
@@ -579,6 +606,18 @@ func (s *Server) GetLengthField() *ziface.LengthField {
 		return s.decoder.GetLengthField()
 	}
 	return nil
+}
+
+// SetFrameDecoder sets the custom frame decoder for handling custom packet splitting
+// (设置自定义帧解码器，用于处理自定义粘包)
+func (s *Server) SetFrameDecoder(frameDecoder ziface.IFrameDecoder) {
+	s.frameDecoder = frameDecoder
+}
+
+// GetFrameDecoder gets the custom frame decoder
+// (获取自定义帧解码器)
+func (s *Server) GetFrameDecoder() ziface.IFrameDecoder {
+	return s.frameDecoder
 }
 
 func (s *Server) AddInterceptor(interceptor ziface.IInterceptor) {

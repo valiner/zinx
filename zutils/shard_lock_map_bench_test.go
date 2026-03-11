@@ -97,16 +97,20 @@ func BenchmarkMultiInsertDifferentSyncMap(b *testing.B) {
 }
 
 func BenchmarkMultiInsertDifferent_1_Shard(b *testing.B) {
-	runWithShards(benchmarkMultiInsertDifferent, b, 1)
+	slm := NewShardLockMapsWithCount(1)
+	benchmarkMultiInsertDifferentWithMap(slm, b)
 }
 func BenchmarkMultiInsertDifferent_16_Shard(b *testing.B) {
-	runWithShards(benchmarkMultiInsertDifferent, b, 16)
+	slm := NewShardLockMapsWithCount(16)
+	benchmarkMultiInsertDifferentWithMap(slm, b)
 }
 func BenchmarkMultiInsertDifferent_32_Shard(b *testing.B) {
-	runWithShards(benchmarkMultiInsertDifferent, b, 32)
+	slm := NewShardLockMapsWithCount(32)
+	benchmarkMultiInsertDifferentWithMap(slm, b)
 }
 func BenchmarkMultiInsertDifferent_256_Shard(b *testing.B) {
-	runWithShards(benchmarkMultiInsertDifferent, b, 256)
+	slm := NewShardLockMapsWithCount(256)
+	benchmarkMultiInsertDifferentWithMap(slm, b)
 }
 
 func BenchmarkMultiInsertSame(b *testing.B) {
@@ -181,16 +185,20 @@ func BenchmarkMultiGetSetDifferentSyncMap(b *testing.B) {
 }
 
 func BenchmarkMultiGetSetDifferent_1_Shard(b *testing.B) {
-	runWithShards(benchmarkMultiGetSetDifferent, b, 1)
+	slm := NewShardLockMapsWithCount(1)
+	benchmarkMultiGetSetDifferentWithMap(slm, b)
 }
 func BenchmarkMultiGetSetDifferent_16_Shard(b *testing.B) {
-	runWithShards(benchmarkMultiGetSetDifferent, b, 16)
+	slm := NewShardLockMapsWithCount(16)
+	benchmarkMultiGetSetDifferentWithMap(slm, b)
 }
 func BenchmarkMultiGetSetDifferent_32_Shard(b *testing.B) {
-	runWithShards(benchmarkMultiGetSetDifferent, b, 32)
+	slm := NewShardLockMapsWithCount(32)
+	benchmarkMultiGetSetDifferentWithMap(slm, b)
 }
 func BenchmarkMultiGetSetDifferent_256_Shard(b *testing.B) {
-	runWithShards(benchmarkMultiGetSetDifferent, b, 256)
+	slm := NewShardLockMapsWithCount(256)
+	benchmarkMultiGetSetDifferentWithMap(slm, b)
 }
 
 func BenchmarkMultiGetSetBlockSyncMap(b *testing.B) {
@@ -211,16 +219,20 @@ func BenchmarkMultiGetSetBlockSyncMap(b *testing.B) {
 }
 
 func BenchmarkMultiGetSetBlock_1_Shard(b *testing.B) {
-	runWithShards(benchmarkMultiGetSetBlock, b, 1)
+	slm := NewShardLockMapsWithCount(1)
+	benchmarkMultiGetSetBlockWithMap(slm, b)
 }
 func BenchmarkMultiGetSetBlock_16_Shard(b *testing.B) {
-	runWithShards(benchmarkMultiGetSetBlock, b, 16)
+	slm := NewShardLockMapsWithCount(16)
+	benchmarkMultiGetSetBlockWithMap(slm, b)
 }
 func BenchmarkMultiGetSetBlock_32_Shard(b *testing.B) {
-	runWithShards(benchmarkMultiGetSetBlock, b, 32)
+	slm := NewShardLockMapsWithCount(32)
+	benchmarkMultiGetSetBlockWithMap(slm, b)
 }
 func BenchmarkMultiGetSetBlock_256_Shard(b *testing.B) {
-	runWithShards(benchmarkMultiGetSetBlock, b, 256)
+	slm := NewShardLockMapsWithCount(256)
+	benchmarkMultiGetSetBlockWithMap(slm, b)
 }
 
 func benchmarkMultiInsertDifferent(b *testing.B) {
@@ -298,9 +310,41 @@ func GetSetSyncMap(m *sync.Map, finished chan struct{}) (get func(key, value str
 	return
 }
 
-func runWithShards(bench func(b *testing.B), b *testing.B, shardsCount int) {
-	oldShardsCount := ShardCount
-	ShardCount = shardsCount
-	bench(b)
-	ShardCount = oldShardsCount
+func benchmarkMultiInsertDifferentWithMap(slm ShardLockMaps, b *testing.B) {
+	finished := make(chan struct{}, b.N)
+	_, set := GetSet(slm, finished)
+	for i := 0; i < b.N; i++ {
+		set(strconv.Itoa(i), strconv.Itoa(i))
+	}
+	for i := 0; i < b.N; i++ {
+		<-finished
+	}
+}
+
+func benchmarkMultiGetSetDifferentWithMap(slm ShardLockMaps, b *testing.B) {
+	finished := make(chan struct{}, 2*b.N)
+	get, set := GetSet(slm, finished)
+	for i := 0; i < b.N; i++ {
+		go get(strconv.Itoa(i), "value")
+		go set(strconv.Itoa(i), "value")
+	}
+	for i := 0; i < 2*b.N; i++ {
+		<-finished
+	}
+}
+
+func benchmarkMultiGetSetBlockWithMap(slm ShardLockMaps, b *testing.B) {
+	finished := make(chan struct{}, 2*b.N)
+	get, set := GetSet(slm, finished)
+	for i := 0; i < 100; i++ {
+		set(strconv.Itoa(i), "value")
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		go set(strconv.Itoa(i%100), "value")
+		go get(strconv.Itoa(i%100), "value")
+	}
+	for i := 0; i < 2*b.N; i++ {
+		<-finished
+	}
 }

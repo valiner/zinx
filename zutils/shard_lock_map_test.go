@@ -118,14 +118,14 @@ func TestRemove(t *testing.T) {
 		t.Error("Expecting ok to be false for missing items.")
 	}
 
-	if (temp != TestUser{}) {
+	if temp != nil {
 		t.Error("Expecting item to be nil after its removal.")
 	}
 
 	slm.Remove("user")
 
 	isEmpty := slm.IsEmpty()
-	if isEmpty {
+	if !isEmpty {
 		t.Error("map should be empty.")
 	}
 
@@ -310,12 +310,8 @@ func TestItems(t *testing.T) {
 }
 
 func TestJsonMarshal(t *testing.T) {
-	ShardCount = 2
-	defer func() {
-		ShardCount = 32
-	}()
 	expected := "{\"a\":1,\"b\":2}"
-	slm := NewShardLockMaps()
+	slm := NewShardLockMapsWithCount(2)
 	slm.Set("a", 1)
 	slm.Set("b", 2)
 	j, err := slm.MarshalJSON()
@@ -367,7 +363,7 @@ func TestFnv32(t *testing.T) {
 	hasher := fnv.New32()
 	_, err := hasher.Write(key)
 	if err != nil {
-		t.Errorf(err.Error())
+		t.Errorf("%v", err)
 	}
 	if (&Fnv32Hash{}).Sum(string(key)) != hasher.Sum32() {
 		t.Errorf("Bundled fnv32 produced %d, expected result from hash/fnv32 is %d", (&Fnv32Hash{}).Sum(string(key)), hasher.Sum32())
@@ -506,5 +502,219 @@ func TestConcurrent(t *testing.T) {
 		if i != a[i] {
 			t.Error("missing value", i)
 		}
+	}
+}
+
+// TestGetOrSet tests the GetOrSet method
+func TestGetOrSet(t *testing.T) {
+	slm := NewShardLockMaps()
+
+	// Test setting a new value
+	value, isSet := slm.GetOrSet("key1", "value1")
+	if !isSet {
+		t.Error("Expected isSet to be true for new key")
+	}
+	if value != "value1" {
+		t.Error("Expected value to be 'value1'")
+	}
+
+	// Test getting existing value
+	value, isSet = slm.GetOrSet("key1", "value2")
+	if isSet {
+		t.Error("Expected isSet to be false for existing key")
+	}
+	if value != "value1" {
+		t.Error("Expected value to be 'value1'")
+	}
+}
+
+// TestGetOrSetFunc tests the GetOrSetFunc method
+func TestGetOrSetFunc(t *testing.T) {
+	slm := NewShardLockMaps()
+
+	// Test setting a new value with function
+	value, isSet := slm.GetOrSetFunc("key1", func(key string) interface{} {
+		return "generated_" + key
+	})
+	if !isSet {
+		t.Error("Expected isSet to be true for new key")
+	}
+	if value != "generated_key1" {
+		t.Error("Expected value to be 'generated_key1'")
+	}
+
+	// Test getting existing value
+	value, isSet = slm.GetOrSetFunc("key1", func(key string) interface{} {
+		return "should_not_be_called"
+	})
+	if isSet {
+		t.Error("Expected isSet to be false for existing key")
+	}
+	if value != "generated_key1" {
+		t.Error("Expected value to be 'generated_key1'")
+	}
+}
+
+// TestGetOrSetFuncLock tests the GetOrSetFuncLock method
+func TestGetOrSetFuncLock(t *testing.T) {
+	slm := NewShardLockMaps()
+
+	// Test setting a new value with function in lock
+	value, isSet := slm.GetOrSetFuncLock("key1", func(key string) interface{} {
+		return "locked_" + key
+	})
+	if !isSet {
+		t.Error("Expected isSet to be true for new key")
+	}
+	if value != "locked_key1" {
+		t.Error("Expected value to be 'locked_key1'")
+	}
+
+	// Test getting existing value
+	value, isSet = slm.GetOrSetFuncLock("key1", func(key string) interface{} {
+		return "should_not_be_called"
+	})
+	if isSet {
+		t.Error("Expected isSet to be false for existing key")
+	}
+	if value != "locked_key1" {
+		t.Error("Expected value to be 'locked_key1'")
+	}
+}
+
+// TestMGet tests the MGet method
+func TestMGet(t *testing.T) {
+	slm := NewShardLockMaps()
+	slm.Set("key1", "value1")
+	slm.Set("key2", "value2")
+	slm.Set("key3", "value3")
+
+	// Test getting multiple existing keys
+	values := slm.MGet("key1", "key2", "key3")
+	if len(values) != 3 {
+		t.Error("Expected 3 values")
+	}
+	if values["key1"] != "value1" || values["key2"] != "value2" || values["key3"] != "value3" {
+		t.Error("Expected correct values")
+	}
+
+	// Test getting mix of existing and non-existing keys
+	values = slm.MGet("key1", "nonexistent", "key2")
+	if len(values) != 2 {
+		t.Error("Expected 2 values for mix of existing and non-existing keys")
+	}
+	if values["key1"] != "value1" || values["key2"] != "value2" {
+		t.Error("Expected correct values for existing keys")
+	}
+}
+
+// TestGetAll tests the GetAll method
+func TestGetAll(t *testing.T) {
+	slm := NewShardLockMaps()
+	slm.Set("key1", "value1")
+	slm.Set("key2", "value2")
+
+	all := slm.GetAll()
+	if len(all) != 2 {
+		t.Error("Expected 2 items in GetAll")
+	}
+	if all["key1"] != "value1" || all["key2"] != "value2" {
+		t.Error("Expected correct values in GetAll")
+	}
+}
+
+// TestLockFuncWithKey tests the LockFuncWithKey method
+func TestLockFuncWithKey(t *testing.T) {
+	slm := NewShardLockMaps()
+	slm.Set("key1", "value1")
+	slm.Set("key2", "value2")
+
+	// Test modifying a specific key's shard
+	slm.LockFuncWithKey("key1", func(data map[string]interface{}) {
+		if val, ok := data["key1"]; ok {
+			data["key1"] = val.(string) + "_modified"
+		}
+	})
+
+	value, ok := slm.Get("key1")
+	if !ok || value != "value1_modified" {
+		t.Error("Expected key1 to be modified")
+	}
+}
+
+// TestRLockFuncWithKey tests the RLockFuncWithKey method
+func TestRLockFuncWithKey(t *testing.T) {
+	slm := NewShardLockMaps()
+	slm.Set("key1", "value1")
+	slm.Set("key2", "value2")
+
+	// Test reading from a specific key's shard
+	var found bool
+	slm.RLockFuncWithKey("key1", func(data map[string]interface{}) {
+		if _, ok := data["key1"]; ok {
+			found = true
+		}
+	})
+
+	if !found {
+		t.Error("Expected to find key1 in shard")
+	}
+}
+
+// TestLockFunc tests the LockFunc method
+func TestLockFunc(t *testing.T) {
+	slm := NewShardLockMaps()
+	slm.Set("key1", "value1")
+	slm.Set("key2", "value2")
+
+	// Test modifying all shards
+	slm.LockFunc(func(data map[string]interface{}) {
+		for key, val := range data {
+			if str, ok := val.(string); ok {
+				data[key] = str + "_modified"
+			}
+		}
+	})
+
+	value1, _ := slm.Get("key1")
+	value2, _ := slm.Get("key2")
+	if value1 != "value1_modified" || value2 != "value2_modified" {
+		t.Error("Expected all values to be modified")
+	}
+}
+
+// TestRLockFunc tests the RLockFunc method
+func TestRLockFunc(t *testing.T) {
+	slm := NewShardLockMaps()
+	slm.Set("key1", "value1")
+	slm.Set("key2", "value2")
+
+	// Test reading from all shards
+	var count int
+	slm.RLockFunc(func(data map[string]interface{}) {
+		count += len(data)
+	})
+
+	if count != 2 {
+		t.Error("Expected to find 2 items across all shards")
+	}
+}
+
+// TestClearWithFuncLock tests the ClearWithFuncLock method
+func TestClearWithFuncLock(t *testing.T) {
+	slm := NewShardLockMaps()
+	slm.Set("key1", "value1")
+	slm.Set("key2", "value2")
+
+	var clearedKeys []string
+	slm.ClearWithFuncLock(func(key string, val interface{}) {
+		clearedKeys = append(clearedKeys, key)
+	})
+
+	if len(clearedKeys) != 2 {
+		t.Error("Expected 2 keys to be cleared")
+	}
+	if slm.Count() != 0 {
+		t.Error("Expected map to be empty after ClearWithFuncLock")
 	}
 }

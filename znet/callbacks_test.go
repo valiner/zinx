@@ -1,29 +1,120 @@
 package znet
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestCallback(t *testing.T) {
+	// Test empty list
 	cb := &callbacks{}
-	var count, expected int
-
-	cb.Add("handler", "a", func() {
-		count++
-	})
-	cb.Add("handler", "b", func() {
-		count++
-	})
-	cb.Invoke()
-
-	expected = 2
-	if count != expected {
-		t.Errorf("returned %d, expected %d", count, expected)
+	if cb.Len() != 0 {
+		t.Errorf("Expected count for empty list is 0, but got %d", cb.Len())
 	}
 
-	count = 0
-	expected = 1
-	cb.Remove("handler", "b")
+	// Ensure invoking on an empty registry is a no-op (no panic).
 	cb.Invoke()
-	if count != expected {
-		t.Errorf("returned %d, expected %d", count, expected)
+
+	// Test adding callback functions
+	var count, expected, remove, totalCount int
+	totalCount = 10
+	remove = 5
+
+	// Add multiple callback functions
+	for i := 1; i < totalCount; i++ {
+		expected = expected + i
+		func(ii int) {
+			cb.Add(ii, ii, func() { count = count + ii })
+		}(i)
 	}
+
+	// Verify count after adding
+	expectedCallbacks := totalCount - 1
+	if cb.Len() != expectedCallbacks {
+		t.Errorf("Expected callback count is %d, but got %d", expectedCallbacks, cb.Len())
+	}
+
+	// Test adding nil callback
+	cb.Add(remove, remove, nil)
+	if cb.Len() != expectedCallbacks {
+		t.Errorf("Expected count after adding nil callback is %d, but got %d", expectedCallbacks, cb.Len())
+	}
+
+	// Replace an existing callback with a non-nil one; count should remain unchanged.
+	cb.Add(remove, remove, func() { count += remove })
+	if cb.Len() != expectedCallbacks {
+		t.Errorf("Expected count after replacing existing callback is %d, but got %d", expectedCallbacks, cb.Len())
+	}
+
+	// Remove specified callback
+	cb.Remove(remove, remove)
+
+	// Try to remove non-existent callback
+	cb.Remove(remove+1, remove+2)
+
+	// Execute all callbacks
+	cb.Invoke()
+
+	// Verify execution result
+	expectedSum := expected - remove
+	if count != expectedSum {
+		t.Errorf("Expected execution result is %d, but got %d", expectedSum, count)
+	}
+
+	// Test string type handler and key
+	cb2 := &callbacks{}
+
+	// Add callbacks
+	cb2.Add("handler1", "key1", func() {})
+	cb2.Add("handler2", "key2", func() {})
+	cb2.Add("handler3", "key3", func() {})
+
+	if cb2.Len() != 3 {
+		t.Errorf("Expected callback count is 3, but got %d", cb2.Len())
+	}
+
+	// Remove middle callback
+	cb2.Remove("handler2", "key2")
+	if cb2.Len() != 2 {
+		t.Errorf("Expected count after removing middle callback is 2, but got %d", cb2.Len())
+	}
+
+	// Remove first callback
+	cb2.Remove("handler1", "key1")
+	if cb2.Len() != 1 {
+		t.Errorf("Expected count after removing first callback is 1, but got %d", cb2.Len())
+	}
+
+	// Remove last callback
+	cb2.Remove("handler3", "key3")
+	if cb2.Len() != 0 {
+		t.Errorf("Expected count after removing last callback is 0, but got %d", cb2.Len())
+	}
+
+	// Test removing non-existent callback
+	cb2.Add("handler1", "key1", func() {})
+	cb2.Remove("handler2", "key2") // Try to remove non-existent callback
+
+	// Should still have 1 callback
+	if cb2.Len() != 1 {
+		t.Errorf("Expected callback count is 1, but got %d", cb2.Len())
+	}
+}
+
+func TestCallbackInvokePanicPropagation(t *testing.T) {
+	cb := &callbacks{}
+	cb.Add("h", "k1", func() { panic("boom") })
+
+	// Test that panic is propagated (not swallowed by Invoke)
+	defer func() {
+		if r := recover(); r != nil {
+			if r != "boom" {
+				t.Errorf("Expected panic 'boom', got %v", r)
+			}
+		} else {
+			t.Errorf("Expected panic to be propagated, but it was swallowed")
+		}
+	}()
+
+	// This should panic and be caught by the defer above
+	cb.Invoke()
 }

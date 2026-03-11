@@ -40,7 +40,7 @@ type KcpConnection struct {
 	connIdStr string
 
 	// The workerid responsible for handling the link
-	// 负责处理该链接的workerid
+	// 负责处理该连接的workerid
 	workerID uint32
 
 	// The message management module that manages MsgID and the corresponding processing method
@@ -48,7 +48,7 @@ type KcpConnection struct {
 	msgHandler ziface.IMsgHandle
 
 	// Channel to notify that the connection has exited/stopped
-	// (告知该链接已经退出/停止的channel)
+	// (告知该连接已经退出/停止的channel)
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -61,7 +61,7 @@ type KcpConnection struct {
 	msgLock sync.RWMutex
 
 	// Connection properties
-	// (链接属性)
+	// (连接属性)
 	property map[string]interface{}
 
 	// Lock to protect the current property
@@ -73,7 +73,7 @@ type KcpConnection struct {
 	closed int32
 
 	// Which Connection Manager the current connection belongs to
-	// (当前链接是属于哪个Connection Manager的)
+	// (当前连接是属于哪个Connection Manager的)
 	connManager ziface.IConnManager
 
 	// Hook function when the current connection is created
@@ -101,15 +101,15 @@ type KcpConnection struct {
 	hc ziface.IHeartbeatChecker
 
 	// Connection name, default to be the same as the name of the Server/Client that created the connection
-	// (链接名称，默认与创建链接的Server/Client的Name一致)
+	// (连接名称，默认与创建连接的Server/Client的Name一致)
 	name string
 
 	// Local address of the current connection
-	// (当前链接的本地地址)
+	// (当前连接的本地地址)
 	localAddr string
 
 	// Remote address of the current connection
-	// (当前链接的远程地址)
+	// (当前连接的远程地址)
 	remoteAddr string
 
 	// Close callback
@@ -135,7 +135,10 @@ func newKcpServerConn(server ziface.IServer, conn *kcp.UDPSession, connID uint64
 	}
 
 	lengthField := server.GetLengthField()
-	if lengthField != nil {
+	// First check if there's a custom frame decoder
+	if server.GetFrameDecoder() != nil {
+		c.frameDecoder = server.GetFrameDecoder()
+	} else if lengthField != nil {
 		c.frameDecoder = zinterceptor.NewFrameDecoder(*lengthField)
 	}
 
@@ -150,7 +153,7 @@ func newKcpServerConn(server ziface.IServer, conn *kcp.UDPSession, connID uint64
 	c.connManager = server.GetConnMgr()
 
 	// Add the newly created Conn to the connection manager
-	// (将新创建的Conn添加到链接管理中)
+	// (将新创建的Conn添加到连接管理中)
 	server.GetConnMgr().Add(c)
 
 	return c
@@ -171,7 +174,10 @@ func newKcpClientConn(client ziface.IClient, conn *kcp.UDPSession) ziface.IConne
 	}
 
 	lengthField := client.GetLengthField()
-	if lengthField != nil {
+	// First check if there's a custom frame decoder
+	if client.GetFrameDecoder() != nil {
+		c.frameDecoder = client.GetFrameDecoder()
+	} else if lengthField != nil {
 		c.frameDecoder = zinterceptor.NewFrameDecoder(*lengthField)
 	}
 
@@ -187,8 +193,8 @@ func newKcpClientConn(client ziface.IClient, conn *kcp.UDPSession) ziface.IConne
 // StartWriter is the goroutine that writes messages to the client
 // (写消息Goroutine， 用户将数据发送给客户端)
 func (c *KcpConnection) StartWriter() {
-	zlog.Ins().InfoF("Writer Goroutine is running")
-	defer zlog.Ins().InfoF("%s [conn Writer exit!]", c.RemoteAddr().String())
+	zlog.Ins().DebugF("Writer Goroutine is running")
+	defer zlog.Ins().DebugF("%s [conn Writer exit!]", c.RemoteAddr().String())
 
 	for {
 		select {
@@ -212,8 +218,8 @@ func (c *KcpConnection) StartWriter() {
 // StartReader is a goroutine that reads data from the client
 // (读消息Goroutine，用于从客户端中读取数据)
 func (c *KcpConnection) StartReader() {
-	zlog.Ins().InfoF("[Reader Goroutine is running]")
-	defer zlog.Ins().InfoF("%s [conn Reader exit!]", c.RemoteAddr().String())
+	zlog.Ins().DebugF("[Reader Goroutine is running]")
+	defer zlog.Ins().DebugF("%s [conn Reader exit!]", c.RemoteAddr().String())
 	defer c.Stop()
 	defer func() {
 		if err := recover(); err != nil {
@@ -236,7 +242,9 @@ func (c *KcpConnection) StartReader() {
 				zlog.Ins().ErrorF("read msg head [read datalen=%d], error = %s", n, err)
 				return
 			}
-			zlog.Ins().DebugF("read buffer %s \n", hex.EncodeToString(buffer[0:n]))
+			if zlog.Ins().IsDebugEnabled() {
+				zlog.Ins().DebugF("read buffer %s \n", hex.EncodeToString(buffer[0:n]))
+			}
 
 			// If normal data is read from the peer, update the heartbeat detection Active state
 			// (正常读取到对端数据，更新心跳检测Active状态)
@@ -364,7 +372,7 @@ func (c *KcpConnection) Send(data []byte) error {
 	return nil
 }
 
-func (c *KcpConnection) SendToQueue(data []byte) error {
+func (c *KcpConnection) SendToQueue(data []byte, opts ...ziface.MsgSendOption) error {
 	c.msgLock.RLock()
 	defer c.msgLock.RUnlock()
 
@@ -377,7 +385,15 @@ func (c *KcpConnection) SendToQueue(data []byte) error {
 		go c.StartWriter()
 	}
 
-	idleTimeout := time.NewTimer(5 * time.Millisecond)
+	opt := ziface.MsgSendOptionObj{
+		Timeout: 5 * time.Millisecond,
+	}
+
+	for _, o := range opts {
+		o(&opt)
+	}
+
+	idleTimeout := time.NewTimer(opt.Timeout)
 	defer idleTimeout.Stop()
 
 	if c.isClosed() {
@@ -420,7 +436,7 @@ func (c *KcpConnection) SendMsg(msgID uint32, data []byte) error {
 	return nil
 }
 
-func (c *KcpConnection) SendBuffMsg(msgID uint32, data []byte) error {
+func (c *KcpConnection) SendBuffMsg(msgID uint32, data []byte, opts ...ziface.MsgSendOption) error {
 	if c.isClosed() {
 		return errors.New("connection closed when send buff msg")
 	}
@@ -433,7 +449,15 @@ func (c *KcpConnection) SendBuffMsg(msgID uint32, data []byte) error {
 		go c.StartWriter()
 	}
 
-	idleTimeout := time.NewTimer(5 * time.Millisecond)
+	opt := ziface.MsgSendOptionObj{
+		Timeout: 5 * time.Millisecond,
+	}
+
+	for _, o := range opts {
+		o(&opt)
+	}
+
+	idleTimeout := time.NewTimer(opt.Timeout)
 	defer idleTimeout.Stop()
 
 	msg, err := c.packet.Pack(zpack.NewMsgPackage(msgID, data))
@@ -495,7 +519,7 @@ func (c *KcpConnection) finalizer() {
 	}
 
 	// Call the callback function registered by the user when closing the connection if it exists
-	//(如果用户注册了该链接的	关闭回调业务，那么在此刻应该显示调用)
+	//(如果用户注册了该连接的	关闭回调业务，那么在此刻应该显示调用)
 	c.callOnConnStop()
 
 	c.msgLock.Lock()
@@ -529,19 +553,19 @@ func (c *KcpConnection) finalizer() {
 		c.InvokeCloseCallbacks()
 	}()
 
-	zlog.Ins().InfoF("Conn Stop()...ConnID = %d", c.connID)
+	zlog.Ins().DebugF("Conn Stop()...ConnID = %d", c.connID)
 }
 
 func (c *KcpConnection) callOnConnStart() {
 	if c.onConnStart != nil {
-		zlog.Ins().InfoF("ZINX CallOnConnStart....")
+		zlog.Ins().DebugF("ZINX CallOnConnStart....")
 		c.onConnStart(c)
 	}
 }
 
 func (c *KcpConnection) callOnConnStop() {
 	if c.onConnStop != nil {
-		zlog.Ins().InfoF("ZINX CallOnConnStop....")
+		zlog.Ins().DebugF("ZINX CallOnConnStop....")
 		c.onConnStop(c)
 	}
 }

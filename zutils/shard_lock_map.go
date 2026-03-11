@@ -1,3 +1,5 @@
+// Package zutils provides utility functions and data structures for the Zinx framework.
+// This package includes a high-performance sharded concurrent map implementation.
 package zutils
 
 import (
@@ -5,51 +7,80 @@ import (
 	"sync"
 )
 
-var ShardCount = 32
+// DefaultShardCount is the default number of shards for the concurrent map.
+// A higher number reduces lock contention but increases memory overhead.
+var DefaultShardCount = 32
 
-// ShardLockMaps A "thread" safe map of type string:Anything.
-// To avoid lock bottlenecks this map is dived to several (ShardCount) map shards.
+// ShardLockMaps is a thread-safe map of type string:Anything.
+// To avoid lock bottlenecks, this map is divided into several shards.
+// Each shard has its own read-write mutex, allowing concurrent access
+// to different shards without blocking.
 type ShardLockMaps struct {
-	shards []*SingleShardMap
-	hash   IHash
+	shards     []*SingleShardMap
+	hash       IHash
+	shardCount int
 }
 
-// SingleShardMap A "thread" safe string to anything map.
+// SingleShardMap is a thread-safe string to anything map.
+// It represents a single shard within the ShardLockMaps.
 type SingleShardMap struct {
 	items map[string]interface{}
 	sync.RWMutex
 }
 
 // createShardLockMaps Creates a new concurrent map.
-func createShardLockMaps(hash IHash) ShardLockMaps {
+func createShardLockMaps(hash IHash, shardCount int) ShardLockMaps {
 	slm := ShardLockMaps{
-		shards: make([]*SingleShardMap, ShardCount),
-		hash:   hash,
+		shards:     make([]*SingleShardMap, shardCount),
+		hash:       hash,
+		shardCount: shardCount,
 	}
-	for i := 0; i < ShardCount; i++ {
+	for i := 0; i < shardCount; i++ {
 		slm.shards[i] = &SingleShardMap{items: make(map[string]interface{})}
 	}
 	return slm
 }
 
-// NewShardLockMaps Creates a new ShardLockMaps.
+// NewShardLockMaps creates a new ShardLockMaps with default shard count.
+// Example usage:
+//
+//	m := NewShardLockMaps()
+//	m.Set("key", "value")
+//	if val, ok := m.Get("key"); ok {
+//	    fmt.Println(val)
+//	}
 func NewShardLockMaps() ShardLockMaps {
-	return createShardLockMaps(DefaultHash())
+	return createShardLockMaps(DefaultHash(), DefaultShardCount)
 }
 
+// NewShardLockMapsWithCount creates a new ShardLockMaps with custom shard count.
+// Use this when you need to tune performance based on your workload.
+// More shards = less lock contention but more memory overhead.
+func NewShardLockMapsWithCount(shardCount int) ShardLockMaps {
+	return createShardLockMaps(DefaultHash(), shardCount)
+}
+
+// NewWithCustomHash creates a new ShardLockMaps with custom hash function.
+// Use this when you need a different hash distribution strategy.
 func NewWithCustomHash(hash IHash) ShardLockMaps {
-	return createShardLockMaps(hash)
+	return createShardLockMaps(hash, DefaultShardCount)
+}
+
+// NewWithCustomHashAndCount creates a new ShardLockMaps with custom hash function and shard count.
+// This provides maximum flexibility for performance tuning.
+func NewWithCustomHashAndCount(hash IHash, shardCount int) ShardLockMaps {
+	return createShardLockMaps(hash, shardCount)
 }
 
 // GetShard returns shard under given key
 func (slm ShardLockMaps) GetShard(key string) *SingleShardMap {
-	return slm.shards[slm.hash.Sum(key)%uint32(ShardCount)]
+	return slm.shards[slm.hash.Sum(key)%uint32(slm.shardCount)]
 }
 
 // Count returns the number of elements within the map.
 func (slm ShardLockMaps) Count() int {
 	count := 0
-	for i := 0; i < ShardCount; i++ {
+	for i := 0; i < slm.shardCount; i++ {
 		shard := slm.shards[i]
 		shard.RLock()
 		count += len(shard.items)
@@ -144,6 +175,65 @@ func (slm ShardLockMaps) Pop(key string) (v interface{}, exists bool) {
 	return v, exists
 }
 
+// GetOrSet gets the value for the given key, or sets it if it doesn't exist.
+// Returns the value and whether it was set (true) or already existed (false).
+func (slm ShardLockMaps) GetOrSet(key string, value interface{}) (interface{}, bool) {
+	if v, ok := slm.Get(key); ok {
+		return v, false
+	}
+	return slm.doSetWithLockCheck(key, value)
+}
+
+// GetOrSetFunc gets the value for the given key, or sets it using the provided function if it doesn't exist.
+// The function f is called outside the lock to avoid deadlocks.
+// Returns the value and whether it was set (true) or already existed (false).
+func (slm ShardLockMaps) GetOrSetFunc(key string, f func(key string) interface{}) (interface{}, bool) {
+	if v, ok := slm.Get(key); ok {
+		return v, false
+	}
+	return slm.doSetWithLockCheck(key, f(key))
+}
+
+// GetOrSetFuncLock gets the value for the given key, or sets it using the provided function if it doesn't exist.
+// The function f is called inside the lock for atomic operations.
+// WARNING: Do not perform operations on the container within f to avoid deadlocks.
+// Returns the value and whether it was set (true) or already existed (false).
+func (slm ShardLockMaps) GetOrSetFuncLock(key string, f func(key string) interface{}) (interface{}, bool) {
+	if v, ok := slm.Get(key); ok {
+		return v, false
+	}
+	return slm.doSetWithLockCheckWithFunc(key, f)
+}
+
+// doSetWithLockCheck performs a set operation with lock checking
+func (slm ShardLockMaps) doSetWithLockCheck(key string, val interface{}) (interface{}, bool) {
+	shard := slm.GetShard(key)
+	shard.Lock()
+	defer shard.Unlock()
+
+	if got, ok := shard.items[key]; ok {
+		return got, false
+	}
+
+	shard.items[key] = val
+	return val, true
+}
+
+// doSetWithLockCheckWithFunc performs a set operation with function execution inside lock
+func (slm ShardLockMaps) doSetWithLockCheckWithFunc(key string, f func(key string) interface{}) (interface{}, bool) {
+	shard := slm.GetShard(key)
+	shard.Lock()
+	defer shard.Unlock()
+
+	if got, ok := shard.items[key]; ok {
+		return got, false
+	}
+
+	val := f(key)
+	shard.items[key] = val
+	return val, true
+}
+
 // Clear removes all items from map.
 func (slm ShardLockMaps) Clear() {
 	for item := range slm.IterBuffered() {
@@ -151,9 +241,84 @@ func (slm ShardLockMaps) Clear() {
 	}
 }
 
+// LockFuncWithKey executes a function with write lock on the shard containing the key.
+// WARNING: Do not perform operations on the container within f to avoid deadlocks.
+func (slm ShardLockMaps) LockFuncWithKey(key string, f func(shardData map[string]interface{})) {
+	shard := slm.GetShard(key)
+	shard.Lock()
+	defer shard.Unlock()
+	f(shard.items)
+}
+
+// RLockFuncWithKey executes a function with read lock on the shard containing the key.
+// WARNING: Do not perform write operations on the container within f to avoid deadlocks.
+func (slm ShardLockMaps) RLockFuncWithKey(key string, f func(shardData map[string]interface{})) {
+	shard := slm.GetShard(key)
+	shard.RLock()
+	defer shard.RUnlock()
+	f(shard.items)
+}
+
+// LockFunc executes a function with write lock on all shards.
+// WARNING: Do not perform operations on the container within f to avoid deadlocks.
+func (slm ShardLockMaps) LockFunc(f func(shardData map[string]interface{})) {
+	for _, shard := range slm.shards {
+		shard.Lock()
+		f(shard.items)
+		shard.Unlock()
+	}
+}
+
+// RLockFunc executes a function with read lock on all shards.
+// WARNING: Do not perform write operations on the container within f to avoid deadlocks.
+func (slm ShardLockMaps) RLockFunc(f func(shardData map[string]interface{})) {
+	for _, shard := range slm.shards {
+		shard.RLock()
+		f(shard.items)
+		shard.RUnlock()
+	}
+}
+
+// ClearWithFuncLock clears all items with a callback function executed under lock.
+// WARNING: Do not perform operations on the container within onClear to avoid deadlocks.
+func (slm ShardLockMaps) ClearWithFuncLock(onClear func(key string, val interface{})) {
+	for _, shard := range slm.shards {
+		shard.Lock()
+		for key, val := range shard.items {
+			onClear(key, val)
+		}
+		shard.items = make(map[string]interface{})
+		shard.Unlock()
+	}
+}
+
 // IsEmpty checks if map is empty.
 func (slm ShardLockMaps) IsEmpty() bool {
 	return slm.Count() == 0
+}
+
+// MGet retrieves multiple elements from the map.
+func (slm ShardLockMaps) MGet(keys ...string) map[string]interface{} {
+	data := make(map[string]interface{})
+	for _, key := range keys {
+		if val, ok := slm.Get(key); ok {
+			data[key] = val
+		}
+	}
+	return data
+}
+
+// GetAll returns a copy of all items in the map.
+func (slm ShardLockMaps) GetAll() map[string]interface{} {
+	data := make(map[string]interface{})
+	for _, shard := range slm.shards {
+		shard.RLock()
+		for key, val := range shard.items {
+			data[key] = val
+		}
+		shard.RUnlock()
+	}
+	return data
 }
 
 // Tuple Used by the IterBuffered functions to wrap two variables together over a channel,
@@ -167,9 +332,9 @@ type Tuple struct {
 // It returns once the size of each buffered channel is determined,
 // before all the channels are populated using goroutines.
 func snapshot(slm ShardLockMaps) (chanList []chan Tuple) {
-	chanList = make([]chan Tuple, ShardCount)
+	chanList = make([]chan Tuple, slm.shardCount)
 	wg := sync.WaitGroup{}
-	wg.Add(ShardCount)
+	wg.Add(slm.shardCount)
 	for index, shard := range slm.shards {
 		go func(index int, shard *SingleShardMap) {
 			shard.RLock()
@@ -231,7 +396,7 @@ func (slm ShardLockMaps) Keys() []string {
 	ch := make(chan string, count)
 	go func() {
 		wg := sync.WaitGroup{}
-		wg.Add(ShardCount)
+		wg.Add(slm.shardCount)
 		for _, shard := range slm.shards {
 			go func(shard *SingleShardMap) {
 				shard.RLock()

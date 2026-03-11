@@ -15,7 +15,7 @@ type IServer interface {
 	Serve() // Start the business service method(开启业务服务方法)
 
 	// Routing feature: register a routing business method for the current service for client link processing use
-	//(路由功能：给当前服务注册一个路由业务方法，供客户端链接处理使用)
+	//(路由功能：给当前服务注册一个路由业务方法，供客户端连接处理使用)
 	AddRouter(msgID uint32, router IRouter)
 
 	// New version of routing (新版路由方式)
@@ -27,7 +27,7 @@ type IServer interface {
 	// Common component management (公共组件管理)
 	Use(Handlers ...RouterHandler) IRouterSlices
 
-	// Get connection management (得到链接管理)
+	// Get connection management (得到连接管理)
 	GetConnMgr() IConnManager
 
 	// Set Hook function when the connection is created for the Server (设置该Server的连接创建时Hook函数)
@@ -72,6 +72,13 @@ type IServer interface {
 	GetLengthField() *LengthField
 	SetDecoder(IDecoder)
 	AddInterceptor(IInterceptor)
+
+	// Set the custom frame decoder for handling custom packet splitting
+	// (设置自定义帧解码器，用于处理自定义粘包)
+	SetFrameDecoder(IFrameDecoder)
+	// Get the custom frame decoder
+	// (获取自定义帧解码器)
+	GetFrameDecoder() IFrameDecoder
 
 	// Add WebSocket authentication method
 	// (添加websocket认证方法)

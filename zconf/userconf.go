@@ -64,6 +64,15 @@ func UserConfToGlobal(config *Config) {
 		GlobalObject.LogFile = config.LogFile
 		zlog.SetLogFile(GlobalObject.LogDir, GlobalObject.LogFile)
 	}
+	if config.LogSaveDays > 0 {
+		GlobalObject.LogSaveDays = config.LogSaveDays
+	}
+	if config.LogFileSize > 0 {
+		GlobalObject.LogFileSize = config.LogFileSize
+	}
+	if config.LogCons {
+		GlobalObject.LogCons = config.LogCons
+	}
 
 	// Keepalive
 	if config.HeartbeatMax != 0 {
@@ -84,9 +93,16 @@ func UserConfToGlobal(config *Config) {
 	if config.WsPort != 0 {
 		GlobalObject.WsPort = config.WsPort
 	}
+	if config.WsPath != "" {
+		GlobalObject.WsPath = config.WsPath
+	}
 
 	if config.RouterSlicesMode {
 		GlobalObject.RouterSlicesMode = config.RouterSlicesMode
+	}
+
+	if config.RequestPoolMode {
+		GlobalObject.RequestPoolMode = config.RequestPoolMode
 	}
 
 	if config.KcpPort != 0 {
@@ -123,6 +139,14 @@ func UserConfToGlobal(config *Config) {
 
 	if config.KcpRecvWindow != 0 {
 		GlobalObject.KcpRecvWindow = config.KcpRecvWindow
+	}
+
+	if config.KcpFecDataShards != 0 {
+		GlobalObject.KcpFecDataShards = config.KcpFecDataShards
+	}
+
+	if config.KcpFecParityShards != 0 {
+		GlobalObject.KcpFecParityShards = config.KcpFecParityShards
 	}
 
 }

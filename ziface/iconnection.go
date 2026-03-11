@@ -10,7 +10,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// // Define connection interface
+// IConnection Define connection interface
 type IConnection interface {
 	// Start the connection, make the current connection start working
 	// (启动连接，让当前连接开始工作)
@@ -32,13 +32,13 @@ type IConnection interface {
 	GetConnIdStr() string       // Get the current connection ID for string (获取当前字符串连接ID)
 	GetMsgHandler() IMsgHandle  // Get the message handler (获取消息处理器)
 	GetWorkerID() uint32        // Get Worker ID（获取workerid）
-	RemoteAddr() net.Addr       // Get the remote address information of the connection (获取链接远程地址信息)
-	LocalAddr() net.Addr        // Get the local address information of the connection (获取链接本地地址信息)
+	RemoteAddr() net.Addr       // Get the remote address information of the connection (获取连接远程地址信息)
+	LocalAddr() net.Addr        // Get the local address information of the connection (获取连接本地地址信息)
 	LocalAddrString() string    // Get the local address information of the connection as a string
 	RemoteAddrString() string   // Get the remote address information of the connection as a string
 
-	Send(data []byte) error        // Send data directly to the remote TCP client (without buffering)
-	SendToQueue(data []byte) error // Send data to the message queue to be sent to the remote TCP client later
+	Send(data []byte) error                               // Send data directly to the remote TCP client (without buffering)
+	SendToQueue(data []byte, opts ...MsgSendOption) error // Send data to the message queue to be sent to the remote TCP client later
 
 	// Send Message data directly to the remote TCP client (without buffering)
 	// 直接将Message数据发送数据给远程的TCP客户端(无缓冲)
@@ -46,7 +46,7 @@ type IConnection interface {
 
 	// Send Message data to the message queue to be sent to the remote TCP client later (with buffering)
 	// 直接将Message数据发送给远程的TCP客户端(有缓冲)
-	SendBuffMsg(msgID uint32, data []byte) error
+	SendBuffMsg(msgID uint32, data []byte, opts ...MsgSendOption) error
 
 	SetProperty(key string, value interface{})   // Set connection property
 	GetProperty(key string) (interface{}, error) // Get connection property
